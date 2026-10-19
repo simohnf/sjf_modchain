@@ -1,0 +1,71 @@
+#pragma once
+
+#include "JuceHeader.h"
+#include "./PluginProcessorConfig.h"
+
+
+//==============================================================================
+class AudioPluginAudioProcessor final : public juce::AudioProcessor
+{
+public:
+    //==============================================================================
+    AudioPluginAudioProcessor();
+    ~AudioPluginAudioProcessor() override;
+
+    //==============================================================================
+    void prepareToPlay (double sampleRate, int samplesPerBlock) override;
+    void releaseResources() override;
+
+    bool isBusesLayoutSupported (const BusesLayout& layouts) const override;
+
+    void processBlock (juce::AudioBuffer<float>&, juce::MidiBuffer&) noexcept override;
+    void processBlockBypassed(AudioBuffer<float> &buffer, MidiBuffer &midiMessages) override;
+    void processBlockBypassed(juce::AudioBuffer<double>& buffer, juce::MidiBuffer& midiMessages) override;
+    using AudioProcessor::processBlock;
+
+    //==============================================================================
+    juce::AudioProcessorEditor* createEditor() override;
+    bool hasEditor() const override;
+
+    //==============================================================================
+    const juce::String getName() const override;
+
+    bool acceptsMidi() const override;
+    bool producesMidi() const override;
+    bool isMidiEffect() const override;
+    double getTailLengthSeconds() const override;
+
+    //==============================================================================
+    int getNumPrograms() override;
+    int getCurrentProgram() override;
+    void setCurrentProgram (int index) override;
+    const juce::String getProgramName (int index) override;
+    void changeProgramName (int index, const juce::String& newName) override;
+
+    //==============================================================================
+    void getStateInformation (juce::MemoryBlock& destData) override;
+    void setStateInformation (const void* data, int sizeInBytes) override;
+
+    AudioProcessorParameter* getBypassParameter() const override;
+private:
+    void numChannelsChanged() override;
+    void numBusesChanged() override;
+    void processorLayoutsChanged() override;
+    void callPrepare();
+    //==============================================================================
+    UndoManager undoManager;
+    sjf::helpers::BypassWrapper<sjf::plugin_processor_config::Config::Processor, sjf::helpers::bypass_wrapper_config::Bypass> processor;
+    std::unique_ptr<sjf::helpers::ParameterFactory::GroupMetadata> groupMetaData{nullptr};
+    juce::AudioProcessorValueTreeState params;
+    juce::dsp::ProcessSpec processSpec{};
+
+    using Callback = std::function<void()>;
+    sjf::helpers::AsyncCallbackInvoker<Callback> asyncLatencyUpdater{[this]() {
+        lastLatency = processor.getLatencySamples();
+        setLatencySamples(lastLatency);
+    }};
+    int lastLatency{};
+
+    juce::AudioProcessorParameter* bypassParameter{nullptr};
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (AudioPluginAudioProcessor)
+};

@@ -1,0 +1,158 @@
+#!/usr/bin/env python3
+import os
+import sys
+import shutil
+import subprocess
+from pathlib import Path
+
+from VersionHints_template import VERSION_HINTS_TEMPLATE
+
+def run_git(args, cwd):
+    """Utility helper to run git commands safely."""
+    try:
+        subprocess.run(["git"] + args, cwd=cwd, check=True, capture_output=True, text=True)
+    except subprocess.CalledProcessError as e:
+        print(f"Git warning/notice ({' '.join(args)}): {e.stderr.strip()}")
+
+def setup_git_repo(target_dir):
+    print("Initializing fresh Git history...")
+    # 1. Start clean orphan branch with current state staged
+    run_git(["checkout", "--orphan", "fresh-start"], cwd=target_dir)
+    run_git(["add", "-A"], cwd=target_dir)
+    run_git(["commit", "-m", "Initial commit"], cwd=target_dir)
+
+    # 2. Force delete ALL old branches and tags from local refs
+    #    (Uses alias trick so it works natively with your unchanged run_git)
+    run_git([
+        "config", "alias.nuke-refs",
+        "!git for-each-ref --format='%(refname)' refs/heads/ refs/tags/ refs/remotes/ | "
+        "grep -v 'refs/heads/fresh-start$' | "
+        "xargs -r -n 1 git update-ref -d"
+    ], cwd=target_dir)
+    run_git(["nuke-refs"], cwd=target_dir)
+    run_git(["config", "--unset", "alias.nuke-refs"], cwd=target_dir)
+
+    # 3. Rename current orphan branch to main
+    run_git(["branch", "-M", "main"], cwd=target_dir)
+
+    # 4. Update submodules (their .git/modules store remains intact!)
+    if (target_dir / ".gitmodules").exists():
+        print("Updating submodules...")
+        run_git(["submodule", "update", "--init", "--recursive"], cwd=target_dir)
+
+    # 5. Completely purge unreferenced objects and remotes
+    run_git(["remote", "remove", "origin"], cwd=target_dir)
+    run_git(["reflog", "expire", "--expire=now", "--all"], cwd=target_dir)
+    run_git(["gc", "--prune=now", "--aggressive"], cwd=target_dir)
+
+
+def remove_prefix(text, prefix):
+    if text.startswith(prefix):
+        return text[len(prefix):]
+    return text
+
+def make_code(input_str):
+    name = input_str
+    name = remove_prefix(name, "sjf_")
+    words = name.split()
+    ret = ""
+    w = 0
+
+    while len(ret) < 4:
+        # Fallback if we run out of words before reaching 4 characters
+        if len(words) == 0:
+            i = 0
+            while len(ret) < 4:
+                ret += str(i)
+                i += 1
+            break
+
+        # Extract the first character of the current word
+        if len(words[w]) > 0:
+            ret += words[w][0]
+            words[w] = words[w][1:]
+
+        # If the word is now empty, remove it from the list
+        if len(words[w]) == 0:
+            words = words[:w] + words[w + 1 :]
+        else:
+            w += 1
+
+        # Wrap around to the beginning of the word list
+        if w >= len(words):
+            w = 0
+
+    ret = ret.lower()
+    ret = ret[0].upper() + ret[1:]
+    return ret
+
+def replace_old_names_in_file(filepath, project_name):
+    if filepath.exists():
+        content = filepath.read_text(encoding="utf-8")
+        underscores = project_name.replace(" ", "_")
+        all_caps = underscores.upper()
+        pluginCode = make_code(project_name)
+
+        # Replacements (order-safe)
+        content = content.replace("Dummy Plugin", project_name)
+        content = content.replace("DummyPlugin", underscores)
+        content = content.replace("DUMMY_PLUGIN", all_caps)
+        content = content.replace('PLUGIN_CODE "Dumm"', f'PLUGIN_CODE "{pluginCode}"')
+        filepath.write_text(content, encoding="utf-8")
+    else:
+        print(f"Warning: {filepath} not found. Skipping text replacement.")
+
+def reset_version_hints(template_dir):
+    version_hints_path = template_dir / "Source" / "VersionHints.h"
+    version_hints_path.parent.mkdir(parents=True, exist_ok=True)
+    version_hints_path.write_text(VERSION_HINTS_TEMPLATE, encoding="utf-8")
+    print("Reset Source/VersionHints.h for the new project.")
+
+def main():
+    repo_root = Path.cwd()
+    template_dir = repo_root / "sjf_DummyPlugin"
+
+    # 1. Ensure template directory exists
+    if not template_dir.exists() or not template_dir.is_dir():
+        print(f"Error: Template directory '{template_dir}' not found!")
+        sys.exit(1)
+
+    # 2. Prompt for name
+    try:
+        project_name = input("Enter new project name: ").strip()
+    except (KeyboardInterrupt, EOFError):
+        print("\nOperation cancelled.")
+        sys.exit(0)
+
+    if not project_name:
+        print("Error: Project name cannot be empty.")
+        sys.exit(1)
+
+    # 3. String transformations
+    underscores = project_name.replace(" ", "_")
+
+    target_dir = repo_root / underscores
+
+    if target_dir.exists():
+        print(f"Error: Target directory '{target_dir.name}' already exists!")
+        sys.exit(1)
+
+    print(f"\nCreating new project: {project_name} ({underscores})...")
+
+    template_dir.rename(target_dir)
+
+
+    replace_old_names_in_file(target_dir / "CMakeLists.txt", project_name)
+
+    replace_old_names_in_file(target_dir / ".github/workflows/build_and_validate.yml", project_name)
+    replace_old_names_in_file(target_dir / ".github/workflows/quick_validation.yml", project_name)
+
+    reset_version_hints(target_dir)
+
+
+    setup_git_repo(target_dir)
+
+    print(f"\nSuccess! Project created at: {target_dir}")
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,214 @@
+/*
+███████╗     ██╗███████╗    █████╗ ██╗   ██╗██████╗ ██╗ ██████╗
+██╔════╝     ██║██╔════╝   ██╔══██╗██║   ██║██╔══██╗██║██╔═══██╗
+███████╗     ██║█████╗     ███████║██║   ██║██║  ██║██║██║   ██║
+╚════██║██   ██║██╔══╝     ██╔══██║██║   ██║██║  ██║██║██║   ██║
+███████║╚█████╔╝██║███████╗██║  ██║╚██████╔╝██████╔╝██║╚██████╔╝
+╚══════╝ ╚════╝ ╚═╝╚══════╝╚═╝  ╚═╝ ╚═════╝ ╚═════╝ ╚═╝ ╚═════╝
+ */
+//
+// Created by Simon Fay on 13/07/2026.
+//
+#pragma once
+
+#include <sjf/widgets/sjf_GenericEditor.h>
+
+#include <sjf/helpers/Utility/sjf_GainWrapper.h>
+#include <sjf/helpers/sjf_OversamplingWrapper.h>
+#include <sjf/processors/Reverbs/sjf_ReverbPlayground.h>
+#include <sjf/processors/Waveshaper/sjf_Waveshaper.h>
+#include <sjf/processors/sjf_Compressor_juce.h>
+#include <sjf/processors/sjf_Delay.h>
+#include <sjf/processors/sjf_Exciter.h>
+#include <sjf/processors/sjf_Redux.h>
+#include <sjf/processors/sjf_StereoSpread.h>
+#include <sjf/processors/sjf_Tremolo.h>
+#include <sjf/processors/sjf_Utility.h>
+
+#include <sjf/helpers/sjf_BypassWrapper.h>
+#include <sjf/helpers/sjf_ChunkedWrapper.h>
+#include <sjf/helpers/sjf_DynamicProcessorSequence.h>
+#include <sjf/helpers/sjf_Gain.h>
+#include <sjf/helpers/sjf_ParameterFactory.h>
+#include <sjf/helpers/sjf_PresetManager.h>
+#include <sjf/helpers/sjf_ProcessorSequence.h>
+#include <sjf/processors/sjf_Filter_juce.h>
+#include <sjf/processors/sjf_Limiter_juce.h>
+#include <sjf/processors/sjf_SpectralProcessor.h>
+#include <sjf/processors/sjf_Gate_juce.h>
+#include <sjf/processors/sjf_Phaser.h>
+#include <sjf/processors/sjf_Ladder_juce.h>
+
+#include <sjf/widgets/sjf_ModulationManager.h>
+#include <sjf/dsp/sjf_ModulatorLFO.h>
+#include <sjf/dsp/sjf_ModulatorEnvelopeFollower.h>
+
+namespace sjf::plugin_processor_config
+{
+    using namespace sjf::helpers::bypass_wrapper_config;
+
+    struct Config
+    {
+
+        using LFO = sjf::dsp::oscillators::lfo::LFO<dsp::oscillators::lfo::DefaultWaveformProvider,
+                                                    dsp::oscillators::lfo::lfo_config::TempoSync,
+                                                    dsp::oscillators::lfo::lfo_config::Invert,
+                                                    dsp::oscillators::lfo::lfo_config::PhaseOffset,
+                                                    dsp::oscillators::lfo::lfo_config::Smooth,
+                                                    dsp::oscillators::lfo::lfo_config::Depth>;
+
+        using Saturator = sjf::dsp::waveshaper::WaveshaperTypeProvider  <   dsp::waveshaper::SoftClip,
+                                                                            dsp::waveshaper::HardClip,
+                                                                            dsp::waveshaper::Overdrive,
+                                                                            dsp::waveshaper::BucketBrigade,
+                                                                            dsp::waveshaper::Tape
+                                                                        >;
+
+        using Waveshaper = sjf::dsp::waveshaper::FilteredWaveshaper<Saturator>;
+
+        using Delay = sjf::dsp::Delay<  LFO,
+                                        Saturator,
+                                        dsp::delay_config::Feedback,
+                                        dsp::delay_config::Offset,
+                                        dsp::delay_config::TempoSync,
+                                        dsp::delay_config::Filter,
+                                        dsp::delay_config::Detune,
+                                        dsp::delay_config::PingPong,
+                                        dsp::delay_config::Link>;
+
+        using Sat = sjf::helpers::BypassWrapper <Waveshaper,Bypass,Mix>;
+        using Del = sjf::helpers::BypassWrapper <Delay,Bypass,Mix>;
+        using Rev = sjf::helpers::BypassWrapper <sjf::dsp::Reverb,Bypass,Mix>;
+        using Fil = sjf::helpers::BypassWrapper <sjf::dsp::SVF<>,Bypass,Mix>;
+        using Comp = sjf::helpers::BypassWrapper <sjf::dsp::Compressor,Bypass, Mix>;
+        using Chorus = sjf::helpers::BypassWrapper <sjf::dsp::modulation_effects::Chorus,Bypass, Mix, DefaultMixLevel<50.0f>>;
+        using Flanger = sjf::helpers::BypassWrapper <sjf::dsp::modulation_effects::Flanger,Bypass, Mix, DefaultMixLevel<50.0f>>;
+        using Phaser = sjf::helpers::BypassWrapper <sjf::dsp::modulation_effects::BasicPhaser,Bypass, Mix, DefaultMixLevel<50.0f>>;
+        using Exciter = sjf::helpers::BypassWrapper <sjf::helpers::GainWrapper<sjf::dsp::Exciter, true, false>,Bypass, Mix>;
+        using Utility = sjf::helpers::BypassWrapper < sjf::dsp::LiveUtility, Bypass, Mix>;
+        using Redux = sjf::helpers::BypassWrapper < sjf::dsp::Redux, Bypass, Mix>;
+        using Spread = sjf::helpers::BypassWrapper < sjf::dsp::StereoSpread, Bypass, Mix>;
+        using Tremolo = sjf::helpers::BypassWrapper < sjf::dsp::BasicTremolo, Bypass, Mix>;
+        using SpectralProc = sjf::helpers::BypassWrapper < sjf::dsp::SpectralProcessor<>, Bypass, Mix>;
+        using Gate = sjf::helpers::BypassWrapper < sjf::dsp::Gate, Bypass, Mix>;
+        using Ladder = sjf::helpers::BypassWrapper < sjf::dsp::LadderFilter, Bypass, Mix>;
+
+        using Sequence = sjf::helpers::DynamicProcessorSequence<Sat, Del, Rev, Comp, Fil, Fil, Ladder, Chorus, Flanger, Phaser, Exciter, Utility, Redux, Spread, Tremolo, SpectralProc, Gate>;
+
+        using Gain = sjf::helpers::Gain<>;
+
+
+        using Seq = sjf::helpers::OversamplingWrapper<sjf::helpers::BypassWrapper <Sequence,Bypass,Mix>>;
+
+        using Limit = sjf::helpers::BypassWrapper <sjf::dsp::Limiter,Bypass>;
+
+
+        using ModLFO = sjf::dsp::modulation::BasicLFO;
+        using ModEnv = sjf::dsp::modulation::ModulatorEnvelopeFollower<true>;
+        using ModChain = sjf::dsp::modulation::ModulationSystem<ModLFO, ModLFO, ModLFO, ModLFO, ModLFO, ModLFO, ModEnv, ModEnv>;
+
+        // Simply change this alias target to swap out the active core engine
+        using Processor = sjf::helpers::ChunkedWrapper  < sjf::helpers::ProcessorSequence<ModChain, Gain, Seq, Limit, Gain> >;
+
+        template<typename Processor>
+        static juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout(Processor& processor, std::unique_ptr<sjf::helpers::ParameterFactory::GroupMetadata>& groupMetadata) {
+            juce::AudioProcessorValueTreeState::ParameterLayout layout;
+
+            using namespace sjf::helpers::processor_sequence;
+            using SFC = SubFactoryConfig;
+
+
+            auto factory = processor.createParameters   ("FX", "FX",
+                                                                    NestedConfig{
+                                                                        "Mods", "Modulators",
+                                                                        SFC{"LFO1", "LFO 1"},
+                                                                        SFC{"LFO2", "LFO 2"},
+                                                                        SFC{"LFO3", "LFO 3"},
+                                                                        SFC{"LFO4", "LFO 4"},
+                                                                        SFC{"LFO5", "LFO 5"},
+                                                                        SFC{"LFO6", "LFO 6"},
+                                                                        SFC{"Env1", "Envelope 1"},
+                                                                        SFC{"Env2", "Envelope 2"},
+                                                                        },
+                                                                    SFC{"InGain", "Input Gain"},
+                                                                    NestedConfig{
+                                                                        "Chain", "Chain",
+                                                                        SFC{"Sat", "Saturator"},
+                                                                        SFC{"Del", "Delay"},
+                                                                        SFC{"Rev", "Reverb"},
+                                                                        SFC{"Comp", "Compressor"},
+                                                                        SFC{"Filt1", "Filter"},
+                                                                        SFC{"Filt2", "Filter"},
+                                                                        SFC{"Ladd", "Ladder Filter"},
+                                                                        SFC{"Chor", "Chorus"},
+                                                                        SFC{"Flan", "Flanger"},
+                                                                        SFC{"Phas", "Phaser"},
+                                                                        SFC{"Air", "Exciter"},
+                                                                        SFC{"Util", "Utility"},
+                                                                        SFC{"Redux", "Redux"},
+                                                                        SFC{"Spread", "Spread"},
+                                                                        SFC{"Trem", "Tremolo"},
+                                                                        SFC{"Spect", "Spectral Processor"},
+                                                                        SFC{"Gate", "Gate"},
+                                                                    },
+                                                                    SFC{"Limiter", "Limiter"},
+                                                                    SFC{"OutGain", "Output Gain"}
+                                                            );
+
+            groupMetadata = std::make_unique<sjf::helpers::ParameterFactory::GroupMetadata>( helpers::ParameterFactory::createMetadataTree(*factory));
+            layout.add(std::move(factory->getAudioProcessorParameterGroup()));
+            return layout;
+        }
+
+        static juce::AudioProcessorEditor* getEditor(juce::AudioProcessorValueTreeState& apvts, juce::AudioProcessor& processor, const helpers::ParameterFactory::GroupMetadata& metaData, UndoManager* undoManager, ModChain& modChain)
+        {
+
+            return new sjf::gui::modulation::GenericEditorWithModulation(apvts, processor, metaData, modChain, undoManager);
+        }
+    };
+
+
+    /** Structure used for AudioProcessor Callbacks. Borrowed from juce::AudioProcessor */
+    struct BusProperties
+    {
+        bool isInput;
+        /** The name of the bus */
+        juce::String busName;
+
+        /** The default layout of the bus */
+        juce::AudioChannelSet defaultLayout;
+
+        /** Is this bus activated by default? */
+        bool isActivatedByDefault;
+    };
+
+    static std::vector<BusProperties> getBusProperties() {
+        const static auto buses = std::vector<BusProperties>{
+            {true, "Input",  juce::AudioChannelSet::stereo(), true},
+            {false, "Output",  juce::AudioChannelSet::stereo(), true},
+        };
+        return buses;
+    }
+
+    [[maybe_unused]] static bool isBusesLayoutSupported (const juce::AudioProcessor::BusesLayout& layouts)
+    {
+        #if JucePlugin_IsMidiEffect
+        juce::ignoreUnused (layouts);
+        return true;
+        #else
+
+
+        if (layouts.getMainOutputChannelSet() != getBusProperties()[1].defaultLayout)
+            return false;
+
+        // This checks if the input layout matches the output layout
+        #if ! JucePlugin_IsSynth
+        if (layouts.getMainOutputChannelSet() != layouts.getMainInputChannelSet())
+            return false;
+        #endif
+
+        return true;
+        #endif
+    }
+}
+

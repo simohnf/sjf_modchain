@@ -1,0 +1,274 @@
+# Full build:
+#   - builds plugin in release
+#   - runs unit tests
+#   - builds pluginval
+#   - runs pluginval tests
+#   - signs & notarizes macOS binaries/installers
+#   - uploads artefacts
+#   Runs on Mac, Windows, and Linux
+
+name: Build and Validate
+
+env:
+    PROJECT_NAME: sjf_modchain
+
+on:
+    push:
+        branches: ["main"]
+        tags: ["v*"] # uses versions to handle releases
+
+permissions:
+    contents: write
+
+jobs:
+    build:
+        name: Build & Validate (${{ matrix.os }})
+        runs-on: ${{ matrix.os }}
+
+        strategy:
+            fail-fast: false
+            matrix:
+                os: [macos-latest, windows-latest, ubuntu-latest]
+
+        steps:
+            # 1. Check out the repository
+            -   name: Checkout repository
+                uses: actions/checkout@v4
+                with:
+                    submodules: recursive
+
+            # 1b. Import Apple Certificates into Temporary Keychain (macOS only)
+            -   name: Import Apple Certificates
+                if: runner.os == 'macOS'
+                env:
+                    BUILD_KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+                    P12_BASE64: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+                    P12_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PWD }}
+                run: |
+                    KEYCHAIN_PATH=$RUNNER_TEMP/build.keychain
+                    
+                    # Create and unlock temporary keychain
+                    security create-keychain -p "$BUILD_KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
+                    security set-keychain-settings -lut 21600 $KEYCHAIN_PATH
+                    security unlock-keychain -p "$BUILD_KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
+                    
+                    # Decode base64 secret to .p12
+                    echo -n "$P12_BASE64" | base64 --decode -o $RUNNER_TEMP/certificate.p12
+                    
+                    # Import certificate(s)
+                    security import $RUNNER_TEMP/certificate.p12 -k $KEYCHAIN_PATH -P "$P12_PASSWORD" -T /usr/bin/codesign -T /usr/bin/productsign
+                    
+                    # Prevent GUI keychain authorization prompts
+                    security set-key-partition-list -S apple-tool:,apple:,codesign:,productsign: -s -k "$BUILD_KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
+                    
+                    # Set as active keychain
+                    security list-keychains -d user -s $KEYCHAIN_PATH
+
+            # 2. Install Linux audio dependencies
+            -   name: Install Linux Dependencies
+                if: runner.os == 'Linux'
+                run: |
+                    sudo apt-get update
+                    sudo apt-get install -y \
+                        libasound2-dev \
+                        libjack-jackd2-dev \
+                        ladspa-sdk \
+                        freeglut3-dev \
+                        g++ \
+                        libfreetype6-dev \
+                        libfontconfig1-dev \
+                        libcurl4-openssl-dev \
+                        libgl1-mesa-dev \
+                        libglu1-mesa-dev \
+                        libx11-dev \
+                        libxcomposite-dev \
+                        libxcursor-dev \
+                        libxinerama-dev \
+                        libxrandr-dev \
+                        libxrender-dev \
+                        libsysfs-dev \
+                        libxkbcommon-dev \
+                        xvfb
+
+            # 3. Setup Caching
+
+            # A) Mac & Linux: ccache
+            -   name: Setup ccache (macOS & Linux)
+                if: runner.os != 'Windows'
+                uses: Chocobo1/setup-ccache-action@v1
+                with:
+                    preset: 'cmake'
+
+            # B) Windows: sccache for MSVC
+            -   name: Setup sccache (Windows)
+                if: runner.os == 'Windows'
+                uses: mozilla/sccache-action@v0.0.8
+
+            # 4. Configure CMake (Platform-Specific)
+            -   name: Configure CMake (macOS)
+                if: runner.os == 'macOS'
+                run: |
+                    cmake -B build \
+                        -DCMAKE_BUILD_TYPE=Release \
+                        -DCMAKE_OSX_DEPLOYMENT_TARGET=10.13 \
+                        -DCMAKE_OSX_ARCHITECTURES="x86_64;arm64"
+
+            -   name: Configure CMake (Linux)
+                if: runner.os == 'Linux'
+                run: |
+                    cmake -B build \
+                        -DCMAKE_BUILD_TYPE=Release \
+                        -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+                        -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+
+            -   name: Configure CMake (Windows)
+                if: runner.os == 'Windows'
+                shell: bash
+                env:
+                    SCCACHE_GHA_ENABLED: "true"
+                run: |
+                    cmake -B build \
+                        -DCMAKE_BUILD_TYPE=Release \
+                        -DCMAKE_C_COMPILER_LAUNCHER=sccache \
+                        -DCMAKE_CXX_COMPILER_LAUNCHER=sccache \
+                        -DCMAKE_MSVC_DEBUG_INFORMATION_FORMAT=Embedded
+
+            # 5. Build, Test, and Validate
+            -   name: Build All Targets
+                run: cmake --build build --config Release --target ${{ env.PROJECT_NAME }}_All
+
+            -   name: Run Unit Tests
+                run: cmake --build build --config Release --target ${{ env.PROJECT_NAME }}_Tests
+
+            -   name: Build pluginval
+                run: cmake --build build --config Release --target pluginval
+
+            -   name: Run Pluginval Validation
+                run: cmake --build build --config Release --target ${{ env.PROJECT_NAME }}_validate_All
+
+            # 5b. Code Sign macOS Plugin Binaries BEFORE Packaging
+            -   name: Sign macOS Plugin Binaries
+                if: runner.os == 'macOS'
+                run: |
+                    SIGNING_IDENTITY=$(security find-identity -v -p codesigning | grep "Developer ID Application" | grep "${{ secrets.APPLE_TEAM_ID }}" | head -n 1 | awk -F '"' '{print $2}')
+                    
+                    find build/*_artefacts -maxdepth 4 \( -name "*.vst3" -o -name "*.component" -o -name "*.app" \) | while read -r artifact; do
+                        echo "Signing $artifact with identity: $SIGNING_IDENTITY..."
+                        codesign --force --deep --options runtime --timestamp \
+                            --sign "$SIGNING_IDENTITY" \
+                            "$artifact"
+                    done
+
+            # 5c. Build Installer AFTER signing binaries
+            -   name: Build macOS installer
+                if: runner.os == 'macOS'
+                run: cmake --build build --config Release --target ${{ env.PROJECT_NAME }}_create_installer
+
+            # 5d. Sign .pkg Installer (Developer ID Installer)
+            -   name: Sign macOS .pkg Installer
+                if: runner.os == 'macOS'
+                run: |
+                    INSTALLER_IDENTITY=$(security find-identity -v -p basic | grep "Developer ID Installer" | grep "${{ secrets.APPLE_TEAM_ID }}" | head -n 1 | awk -F '"' '{print $2}')
+                    
+                    find build -maxdepth 3 -name "${{ env.PROJECT_NAME }}*.pkg" | while read -r pkg; do
+                        echo "Signing installer $pkg with identity: $INSTALLER_IDENTITY..."
+                        productsign --sign "$INSTALLER_IDENTITY" "$pkg" "${pkg%.pkg}_signed.pkg"
+                        mv "${pkg%.pkg}_signed.pkg" "$pkg"
+                    done
+
+            # 5e. Notarize Package or Zip Archive
+            -   name: Notarize macOS Release Asset
+                if: runner.os == 'macOS'
+                env:
+                    APPLE_ID: ${{ secrets.APPLE_ID }}
+                    APPLE_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+                    TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+                run: |
+                    PKG_FILE=$(find build -maxdepth 3 -name "${{ env.PROJECT_NAME }}*.pkg" | head -n 1)
+                    
+                    if [ -n "$PKG_FILE" ]; then
+                        echo "Notarizing $PKG_FILE..."
+                        xcrun notarytool submit "$PKG_FILE" \
+                            --apple-id "$APPLE_ID" \
+                            --password "$APPLE_PASSWORD" \
+                            --team-id "$TEAM_ID" \
+                            --wait
+                    else
+                        echo "No .pkg found. Zipping binaries for notarization..."
+                        mkdir -p $RUNNER_TEMP/notary_bundle
+                        find build/*_artefacts -maxdepth 4 \( -name "*.vst3" -o -name "*.component" -o -name "*.app" \) -exec cp -R {} $RUNNER_TEMP/notary_bundle/ \;
+                        ditto -c -k --keepParent $RUNNER_TEMP/notary_bundle $RUNNER_TEMP/PluginNotarize.zip
+                    
+                        xcrun notarytool submit $RUNNER_TEMP/PluginNotarize.zip \
+                            --apple-id "$APPLE_ID" \
+                            --password "$APPLE_PASSWORD" \
+                            --team-id "$TEAM_ID" \
+                            --wait
+                    fi
+
+            # 5f. Staple Notarization Ticket to Installer
+            -   name: Staple macOS Ticket
+                if: runner.os == 'macOS'
+                run: |
+                    find build -maxdepth 3 -name "${{ env.PROJECT_NAME }}*.pkg" | while read -r pkg; do
+                        echo "Stapling ticket to $pkg..."
+                        xcrun stapler staple "$pkg"
+                    done
+
+            # 6a. Upload Plugin Artefacts (Windows & Linux)
+            -   name: Upload Plugin Artefacts (Windows & Linux)
+                if: runner.os != 'macOS'
+                uses: actions/upload-artifact@v4
+                with:
+                    name: ${{ runner.os }}-plugin-builds
+                    path: |
+                        build/*_artefacts/**/*.vst3
+                        build/*_artefacts/**/*.exe
+                        build/*_artefacts/**/Release/Standalone/*
+                    retention-days: 7
+
+            # 6b. Upload Plugin Artefacts (macOS - .pkg only)
+            -   name: Upload Plugin Artefacts (macOS)
+                if: runner.os == 'macOS'
+                uses: actions/upload-artifact@v4
+                with:
+                    name: ${{ runner.os }}-plugin-builds
+                    path: build/**/*.pkg
+                    retention-days: 7
+
+            # 7. Prepare assets for GitHub Release
+            -   name: Prepare Release Assets
+                if: startsWith(github.ref, 'refs/tags/')
+                shell: bash
+                run: |
+                    mkdir -p release_assets
+                    mkdir -p release_bundle
+
+                    if [ "${{ runner.os }}" = "macOS" ]; then
+                        find build -maxdepth 3 -name "${PROJECT_NAME}*.pkg" -exec cp -R {} release_assets/ \;
+                    
+                        if ! ls release_assets/*.pkg 1> /dev/null 2>&1; then
+                            find build/*_artefacts -maxdepth 4 \( -name "*.vst3" -o -name "*.component" -o -name "*.app" \) -exec cp -R {} release_bundle/ \;
+                            7z a "release_assets/${PROJECT_NAME}_macOS.zip" ./release_bundle/*
+                        fi
+                    else
+                        find build/*_artefacts -maxdepth 4 \( -name "*.vst3" -o -name "*.exe" -o -name "*.AppImage" \) ! -name "*_Tests*" -exec cp -R {} release_bundle/ \;
+                        7z a "release_assets/${PROJECT_NAME}_${{ runner.os }}.zip" ./release_bundle/*
+                    fi
+
+            # 8. Upload Plugin Binaries to Release
+            -   name: Upload Plugin Binaries to Release
+                if: startsWith(github.ref, 'refs/tags/')
+                uses: softprops/action-gh-release@v2
+                with:
+                    files: |
+                        release_assets/*.zip
+                        release_assets/*.pkg
+                env:
+                    GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+            # 9. Clean up temporary keychain
+            -   name: Clean up Keychain
+                if: always() && runner.os == 'macOS'
+                run: |
+                    security delete-keychain $RUNNER_TEMP/build.keychain || true

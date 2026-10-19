@@ -1,0 +1,295 @@
+#include "PluginProcessor.h"
+
+
+//==============================================================================
+AudioPluginAudioProcessor::AudioPluginAudioProcessor()
+ : AudioProcessor ([]() {
+     auto ret = BusesProperties{};
+     for ( auto& bus : sjf::plugin_processor_config::getBusProperties()) {
+        ret.addBus(bus.isInput, bus.busName, bus.defaultLayout, bus.isActivatedByDefault);
+     }
+     return ret;
+ }())
+, params(*this, &undoManager, "Params", sjf::plugin_processor_config::Config::createParameterLayout(processor, groupMetaData))
+{
+    sjf::helpers::PresetManager::initAPVTS(params.state, params.processor.getParameterTree(), groupMetaData.get());
+
+    sjf::optional_calls::attachAPVTS(processor, params);
+    sjf::optional_calls::attachToState(processor, params.state);
+
+    bypassParameter = [&]() -> juce::AudioProcessorParameter* {
+        auto topLevelParams = [&]() {
+            auto& tree = getParameterTree();
+            auto subGroups = tree.getSubgroups(false);
+            jassert(subGroups.size() == 1);
+            auto grp = subGroups[0];
+            while (grp && grp->getParameters(false).size() == 0) {
+                auto sub = grp->getSubgroups(false);
+                jassert(sub.size() == 1);
+                grp = sub[0];
+            }
+
+            return grp;
+        }();
+
+        jassert(topLevelParams);
+
+        const auto params_ =  topLevelParams->getParameters(false);
+        jassert(params_.size() >= 1);
+        for (auto param : params_)
+        {
+            if (auto ranged = dynamic_cast<RangedAudioParameter*>(param); ranged->getParameterID().contains("Bypass"))
+                return param;
+        }
+        jassertfalse;
+        return nullptr;
+    }();
+}
+
+AudioPluginAudioProcessor::~AudioPluginAudioProcessor()
+{
+}
+
+//==============================================================================
+const juce::String AudioPluginAudioProcessor::getName() const
+{
+    return JucePlugin_Name;
+}
+
+bool AudioPluginAudioProcessor::acceptsMidi() const
+{
+   #if JucePlugin_WantsMidiInput
+    return true;
+   #else
+    return false;
+   #endif
+}
+
+bool AudioPluginAudioProcessor::producesMidi() const
+{
+   #if JucePlugin_ProducesMidiOutput
+    return true;
+   #else
+    return false;
+   #endif
+}
+
+bool AudioPluginAudioProcessor::isMidiEffect() const
+{
+   #if JucePlugin_IsMidiEffect
+    return true;
+   #else
+    return false;
+   #endif
+}
+
+double AudioPluginAudioProcessor::getTailLengthSeconds() const
+{
+    return 0.0;
+}
+
+int AudioPluginAudioProcessor::getNumPrograms()
+{
+    return 1;   // NB: some hosts don't cope very well if you tell them there are 0 programs,
+                // so this should be at least 1, even if you're not really implementing programs.
+}
+
+int AudioPluginAudioProcessor::getCurrentProgram()
+{
+    return 0;
+}
+
+void AudioPluginAudioProcessor::setCurrentProgram (int index)
+{
+    juce::ignoreUnused (index);
+}
+
+const juce::String AudioPluginAudioProcessor::getProgramName (int index)
+{
+    juce::ignoreUnused (index);
+    return "Default";
+}
+
+void AudioPluginAudioProcessor::changeProgramName (int index, const juce::String& newName)
+{
+    juce::ignoreUnused (index, newName);
+}
+
+//==============================================================================
+void AudioPluginAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
+{
+
+    const auto numChannels = juce::jmax(getTotalNumInputChannels(), getTotalNumOutputChannels());
+    processSpec = juce::dsp::ProcessSpec{sampleRate, static_cast<uint32>(samplesPerBlock), static_cast<juce::uint32>(numChannels)};
+    callPrepare();
+}
+
+void AudioPluginAudioProcessor::releaseResources()
+{
+    // When playback stops, you can use this as an opportunity to free up any
+    // spare memory, etc.
+}
+
+bool AudioPluginAudioProcessor::isBusesLayoutSupported (const BusesLayout& layouts) const
+{
+    return sjf::plugin_processor_config::isBusesLayoutSupported (layouts);
+}
+
+void AudioPluginAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
+                                              juce::MidiBuffer& midiMessages) noexcept
+{
+    if (isSuspended() || buffer.getNumSamples() <= 0)
+        return;
+
+    juce::ignoreUnused (midiMessages);
+
+    juce::ScopedNoDenormals noDenormals;
+    auto totalNumInputChannels  = getTotalNumInputChannels();
+    auto totalNumOutputChannels = getTotalNumOutputChannels();
+
+    // In case we have more outputs than inputs, this code clears any output
+    // channels that didn't contain input data, (because these aren't
+    // guaranteed to be empty - they may contain garbage).
+    // This is here to avoid people getting screaming feedback
+    // when they first compile a plugin, but obviously you don't need to keep
+    // this code if your algorithm always overwrites all the output channels.
+    for (auto i = totalNumInputChannels; i < totalNumOutputChannels; ++i)
+        buffer.clear (i, 0, buffer.getNumSamples());
+
+
+    if ( auto playHead_ = getPlayHead())
+    {
+        auto positionInfo = playHead_->getPosition();
+        if (positionInfo.hasValue())
+        {
+            processor.setPositionInfo(*positionInfo);
+        }
+    }
+
+    if ( lastLatency != processor.getLatencySamples())
+        asyncLatencyUpdater.triggerUpdate();
+
+    juce::dsp::AudioBlock<float> block(buffer);
+    juce::dsp::ProcessContextReplacing<float> context(block);
+    processor.process(context);
+}
+
+void AudioPluginAudioProcessor::processBlockBypassed(AudioBuffer<float> &/*buffer*/,
+                                                     MidiBuffer &/*midiMessages*/)
+{
+    jassertfalse;
+}
+
+
+void AudioPluginAudioProcessor::processBlockBypassed(AudioBuffer<double> &/*buffer*/,
+                                                     MidiBuffer &/*midiMessages*/)
+{
+    jassertfalse;
+}
+
+//==============================================================================
+bool AudioPluginAudioProcessor::hasEditor() const
+{
+    return true; // (change this to false if you choose to not supply an editor)
+}
+
+juce::AudioProcessorEditor* AudioPluginAudioProcessor::createEditor()
+{
+    return sjf::plugin_processor_config::Config::getEditor(params, *this, *groupMetaData, &undoManager, processor.getProcessor().getProcessor().get<0>());
+}
+
+//==============================================================================
+void AudioPluginAudioProcessor::getStateInformation (juce::MemoryBlock& destData)
+{
+    destData = sjf::helpers::PresetManager::toMemoryBlock(params.copyState());
+}
+
+void AudioPluginAudioProcessor::setStateInformation (const void* data, int sizeInBytes)
+{
+    if (const juce::ValueTree loadedTree = sjf::helpers::PresetManager::toValueTree(data, sizeInBytes); loadedTree.isValid())
+    {
+        sjf::helpers::PresetManager::initAPVTS(loadedTree, params.processor.getParameterTree(), groupMetaData.get());
+        if (MessageManager::existsAndIsLockedByCurrentThread())
+        {
+            suspendProcessing(true);
+            params.replaceState(loadedTree);
+            suspendProcessing(false);
+        }
+        else
+        {
+            /// When running pluginval tests on the AU th setStateInformation test kept randomly failing
+            /// like ~3 of 300/400 parameters would fail to reset, different parameters each time
+            /// Seems there's a timing issue with the listeners being called when the value tree state is directly replaced on another thread
+            /// but it was so random I couldn't narrow down exactly what was happening.
+            /// This just forces the parameters to update immediately, and then updates everything else at a later date
+            for (auto* param : getParameters())
+            {
+                if (auto* rangedParam = dynamic_cast<juce::RangedAudioParameter*>(param))
+                {
+                    auto paramID = rangedParam->getParameterID();
+
+                    juce::ValueTree paramNode = loadedTree.getChildWithProperty("id", paramID);
+
+                    if (paramNode.isValid() && paramNode.hasProperty("value"))
+                    {
+                        auto v =  paramNode.getProperty("value").toString();
+                        auto unnormalizedValue = static_cast<float>(paramNode.getProperty("value"));
+                        auto normalizedValue = rangedParam->getNormalisableRange().convertTo0to1(unnormalizedValue);
+
+                        rangedParam->setValueNotifyingHost(normalizedValue);
+
+                        if (auto* rawVal = params.getRawParameterValue(paramID))
+                            rawVal->store(unnormalizedValue); // probably not necessary...
+                    }
+                }
+            }
+
+            MessageManager::callAsync([loadedTree, this]() {
+                for (int i = 0; i < loadedTree.getNumChildren(); ++i)
+                {
+                    auto loadedChild = loadedTree.getChild(i);
+                    if (!loadedChild.hasType("PARAM"))
+                        params.state.getOrCreateChildWithName(loadedChild.getType(), nullptr).copyPropertiesAndChildrenFrom(loadedChild, nullptr);
+                }
+            });
+        }
+    }
+}
+
+void AudioPluginAudioProcessor::numBusesChanged()
+{
+    callPrepare();
+}
+
+void AudioPluginAudioProcessor::numChannelsChanged()
+{
+    callPrepare();
+}
+
+void AudioPluginAudioProcessor::processorLayoutsChanged()
+{
+    callPrepare();
+}
+
+
+void AudioPluginAudioProcessor::callPrepare()
+{
+    const auto numChannels = juce::jmax(getTotalNumInputChannels(), getTotalNumOutputChannels());
+    processSpec.numChannels = static_cast<juce::uint32>(numChannels);
+    processor.prepare(processSpec);
+    lastLatency = processor.getLatencySamples();
+    setLatencySamples(lastLatency);
+
+}
+
+AudioProcessorParameter * AudioPluginAudioProcessor::getBypassParameter() const
+{
+    return bypassParameter;
+}
+
+//==============================================================================
+// This creates new instances of the plugin..
+juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()
+{
+    return new AudioPluginAudioProcessor();
+}
