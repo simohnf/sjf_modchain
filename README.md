@@ -9,7 +9,10 @@
 
 # sjf_modchain
 
-*sjf_modchain* is a flexible semi-modular multi-effects engine. Featuring a comprehensive suite of effect modules driven by an array of freely assignable modulators.
+*sjf_modchain* is a flexible semi-modular multi-effects engine. Featuring a suite of effect modules driven by freely assignable modulators.
+
+<div style="left: 0; width: 100%; height: 0; position: relative; padding-bottom: 56.25%;"><iframe src="https://www.youtube.com/embed/Oc0vaNIk32k?rel=0" style="top: 0; left: 0; width: 100%; height: 100%; position: absolute; border: 0;" allowfullscreen scrolling="no" allow="accelerometer *; clipboard-write *; encrypted-media *; gyroscope *; picture-in-picture *; web-share *;" referrerpolicy="strict-origin"></iframe></div>
+
 
 ### Features
 - Flexible Modulation Matrix: 6 multi-waveform LFOs and 2 dynamic Envelope Followers designed to be routed to any effect parameter across the plugin.
